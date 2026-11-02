@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+import json, re, sys
+from pathlib import Path
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+root = Path.home()/'lab09'
+root.mkdir(exist_ok=True)
+
+if '--detect' in sys.argv:
+    events = root/'events.log'
+    if not events.exists():
+        raise SystemExit('NO_EVENTS')
+
+    failed = set()
+    detected = False
+
+    pattern = re.compile(
+        r"'\s+OR\s+'1'\s*=\s*'1'\s*--",
+        re.IGNORECASE
+    )
+
+    for line in events.read_text().splitlines():
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        ip = e.get('ip','')
+        username = e.get('username','')
+
+        if e.get('event') == 'login_failed':
+            failed.add((ip,username))
+
+        if e.get('event') == 'login_success':
+            original_user = username.split("'")[0]
+
+            if (
+                pattern.search(username)
+                and (ip,original_user) in failed
+            ):
+                detected = True
+
+    if not detected:
+        raise SystemExit('NO_SQLI_CORRELATION')
+
+    (root/'alerts.log').write_text(
+        'SQLI_LOGIN_BYPASS_CONFIRMED\n'
+    )
+    print('LAB09_SOC_OK')
+    sys.exit(0)
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.client_address[0] != '172.29.109.20':
+            self.send_error(403)
+            return
+
+        n = int(self.headers.get('Content-Length',0))
+        if not 0 < n <= 4096:
+            self.send_error(400)
+            return
+
+        try:
+            event = json.loads(self.rfile.read(n))
+            if not (
+                isinstance(event,dict)
+                and event.get('event') in (
+                    'login_failed','login_success'
+                )
+                and isinstance(event.get('username'),str)
+                and isinstance(event.get('ip'),str)
+            ):
+                raise ValueError('bad event')
+        except (ValueError,TypeError):
+            self.send_error(400)
+            return
+
+        with (root/'events.log').open('a') as f:
+            f.write(json.dumps(event)+'\n')
+
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'OK')
+
+print('LAB09_SOC_READY',flush=True)
+HTTPServer(('0.0.0.0',8081),Handler).serve_forever()
